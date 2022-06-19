@@ -1,0 +1,180 @@
+# SECTION 1 - Version
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Template to create a LaunchTemplate, ALB & ASG
+
+
+# SECTION 2 - Parameters
+Parameters:
+  KEYNAME:
+    Type: AWS::EC2::KeyPair::KeyName
+
+  VPC:
+    Type: AWS::EC2::VPC::Id     
+    ConstraintDescription: must be the name of an existing VPC 
+
+  VPCZoneIdentifier:
+      Description: "List the Subnet Ids of the instances"
+      Type: List<AWS::EC2::Subnet::Id>
+
+# SECTION 3 - RESOURCES
+Resources: 
+  LaunchTemplateSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SSH and HTTP
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: 22
+        IpProtocol: tcp
+        ToPort: 22
+      - CidrIp: 0.0.0.0/0
+        FromPort: 80
+        IpProtocol: tcp
+        ToPort: 80   
+      Tags:
+        - Key: Name
+          Value: LaunchTemplateSG 
+      VpcId: !Ref VPC
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allows HTTP
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: 80
+        IpProtocol: tcp
+        ToPort: 80
+      VpcId: !Ref VPC
+
+  ProcoreInstanceProfile: 
+      Type: AWS::IAM::InstanceProfile
+      Properties: 
+        Path: "/"
+        Roles: 
+          - 
+            !Ref ProcoreInstanceRole    
+
+  ProcoreInstanceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: ProcoreInstanceRole
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !Ref ProcoreInstancePolicy
+        - 'arn:aws:iam::aws:policy/AWSCodeCommitFullAccess'
+      
+  ProcoreInstancePolicy:
+    Type: AWS::IAM::ManagedPolicy 
+    Properties: 
+      ManagedPolicyName: AWSCodeCommitFullAccess
+      PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'codecommit:*'
+                Resource: '*'    
+
+  ProcoreLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: ProcoreLaunchTemplate
+      LaunchTemplateData:
+        ImageId: ami-0c02fb55956c7d316
+        InstanceType: t2.micro
+        IamInstanceProfile:
+          Arn: !GetAtt
+            - ProcoreInstanceProfile
+            - Arn
+        KeyName: !Ref KEYNAME
+        SecurityGroupIds:
+          - !Ref LaunchTemplateSecurityGroup
+        UserData: 
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum update -y
+            sudo yum install httpd -y 
+            sudo systemctl start httpd 
+            sudo systemctl enable httpd  
+            curl -O  https://bootstrap.pypa.io/get-pip.py 
+            python3 get-pip.py  
+            pip install git-remote-codecommit 
+            sudo yum install git -y 
+            git clone codecommit::us-east-1://omotola-repo viti
+            sudo cp -r viti/* /var/www/html/ 
+      
+
+  ProcoreTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckPath: /index.html
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 5
+      Port: 80
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 10
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref VPC 
+
+  ProcoreLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties: 
+      Subnets: 
+        - Fn::Select: [ 0, Ref: VPCZoneIdentifier ]               
+        - Fn::Select: [ 1, Ref: VPCZoneIdentifier ]
+      SecurityGroups: 
+        - !Ref LoadBalancerSecurityGroup
+      Tags: 
+        - Key: Name
+          Value: ProcoreLoadBalancer
+
+  ALBListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ProcoreTargetGroup
+      LoadBalancerArn: !Ref ProcoreLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  ProcoreAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties: 
+      AutoScalingGroupName: ProcoreAutoScalingGroup
+      DesiredCapacity: 2
+      HealthCheckGracePeriod: 250
+      HealthCheckType: ELB    
+      LaunchTemplate: 
+        LaunchTemplateId: !Ref ProcoreLaunchTemplate
+        Version: 1
+      MaxSize: 3
+      MinSize: 1
+      TargetGroupARNs: 
+        - !Ref ProcoreTargetGroup
+      VPCZoneIdentifier: 
+        - Fn::Select: [ 0, Ref: VPCZoneIdentifier ]               
+        - Fn::Select: [ 1, Ref: VPCZoneIdentifier ]
+
+  ProcoreServerTargetPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref ProcoreAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 75.0
