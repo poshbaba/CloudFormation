@@ -1,1 +1,1 @@
-# CloudFormation template to
+# CloudFormation template to create Appliction load Balancer, Instance Profile, Target Group, AutoScaling Group and Launch Template with Target Tracking policy (75% CPU utilization) for a Highly available Website in any VPC.
